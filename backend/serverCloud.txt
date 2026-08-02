@@ -1,0 +1,284 @@
+//server.js
+
+const express = require("express")
+const multer = require("multer")
+const cors = require("cors")
+const crypto = require("crypto")
+const { ethers } = require("ethers")
+const { PrismaClient } = require("@prisma/client")
+const storage = require("./storage");
+const prisma = new PrismaClient()
+const sessions = {}
+
+function verifyWallet(req){
+  const token = req.headers["x-session"]
+  if (!token) return null
+  return sessions[token] || null
+}
+
+const app = express()
+app.use(cors())
+app.use(express.json())
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+})
+
+app.post("/nonce", async (req, res) => {
+  const { address } = req.body
+  if (!address) return res.sendStatus(400)
+
+  const key = address.toLowerCase()
+
+  let record = await prisma.nonce.findUnique({
+    where:{
+      address:key
+    }
+  })
+
+  let nonce = record?.nonce
+
+  if(!nonce){
+    nonce = crypto.randomBytes(32).toString("hex")
+
+    await prisma.nonce.upsert({
+      where:{
+        address:key
+      },
+      update:{
+        nonce
+      },
+      create:{
+        address:key,
+        nonce
+      }
+    })
+  }
+
+  res.json({ nonce })
+})
+
+app.post("/login", async (req,res) => {
+  const { address, signature} = req.body
+
+  const key = address.toLowerCase()
+  const record = await prisma.nonce.findUnique({
+      where:{
+          address:key
+      }
+  })
+
+  const nonce = record?.nonce
+
+  if(!nonce) return res.sendStatus(401)
+
+  const message = `Login nonce:${nonce}`
+  const recovered = ethers.verifyMessage(message, signature)
+
+  if (recovered.toLowerCase() !== address.toLowerCase())
+    return res.sendStatus(401)
+
+  await prisma.nonce.delete({
+    where:{
+      address:key
+    }
+  })
+  
+  const sessionToken = crypto.randomBytes(32).toString("hex")
+  sessions[sessionToken]= address
+
+  res.json({sessionToken})
+
+})
+
+app.post("/secret", async (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+
+  const { encryptedSecret } = req.body
+
+  let user = await prisma.user.findUnique({
+      where:{
+          owner
+      },
+      include:{
+          files:true
+      }
+  })
+
+  if(!user){
+      user = await prisma.user.create({
+          data:{
+              owner,
+              encryptedSecret
+          },
+          include:{
+              files:true
+          }
+      })
+  }else{
+      await prisma.user.update({
+          where:{ owner },
+          data:{ encryptedSecret }
+      })
+  }
+  res.sendStatus(200)
+})
+
+app.get("/secret", async (req, res) =>{
+  const owner = verifyWallet(req)
+  if(!owner) return res.sendStatus(401)
+
+  const user = await prisma.user.findUnique({
+      where:{
+          owner
+      }
+  })
+
+  if(!user) return res.json(null)
+
+  res.json({
+      encryptedSecret:user.encryptedSecret
+  })
+})
+
+app.post("/upload", upload.fields([
+  { name: "file", maxCount: 1 },
+  { name: "metadata", maxCount: 1 }
+]), async (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+  
+  if (!req.files?.file?.[0]) {
+    return res.sendStatus(400);
+  }
+  
+  let user = await prisma.user.upsert({
+    where: {
+      owner
+    },
+    update: {},
+    create: {
+      owner
+    }
+  });
+
+  const id = crypto.randomUUID()
+
+  await storage.uploadFile(
+    id,
+    req.files.file[0].buffer,
+    req.files.file[0].mimetype
+  );
+
+  await prisma.file.create({
+    data:{
+      id,
+      owner,
+      metadata:req.body.metadata
+    }
+  })
+
+  res.json({ success: true })
+})
+
+app.get("/files", async (req,res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+  
+  const user = await prisma.user.findUnique({
+    where:{
+        owner
+    },
+    include:{
+        files:true
+    }
+  })
+
+  if(!user)
+    return res.json([])
+
+  res.json(user.files)
+
+})
+
+app.get("/download/:id", async (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+
+  const user = await prisma.user.findUnique({
+      where:{
+          owner
+      },
+      include:{
+          files:true
+      }
+  })
+
+  if(!user) return res.sendStatus(403)
+
+  const dbfile = user.files.find(f => f.id === req.params.id)
+
+  if (!dbfile) return res.sendStatus(403)
+
+  try {
+  const r2file = await storage.downloadFile(req.params.id);
+
+  res.setHeader(
+    "Content-Type",
+    r2file.ContentType || "application/octet-stream"
+  );
+
+  r2file.Body.on("error", (err) => {
+    console.error("Stream error:", err);
+    res.end();
+  });
+
+  r2file.Body.pipe(res);
+
+  } catch (err) {
+    console.error(err);
+    res.sendStatus(404);
+  }
+})
+
+app.delete("/files/:id", async (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+
+  const { id } = req.params
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return res.sendStatus(400)
+  }
+
+  const user = await prisma.user.findUnique({
+    where:{
+      owner
+    },
+    include:{
+      files:true
+    }
+  })
+
+  if(!user) return res.sendStatus(403)
+
+  const dbfile = user.files.find(f => f.id === id)
+  if(!dbfile) return res.sendStatus(403)
+
+  try {
+    await storage.deleteFile(id);
+
+    await prisma.file.delete({
+      where:{
+        id
+      }
+    })
+
+    res.json({ success: true })
+  } catch (err) {
+    res.sendStatus(500)
+  }
+})
+
+app.listen(4000, () => console.log("Backend running on 4000"))

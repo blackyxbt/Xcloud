@@ -1,0 +1,27 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id              String  @id @default(uuid())
+  owner           String  @unique
+  encryptedSecret String?
+  files           File[]
+}
+
+model File {
+  id       String @id @default(uuid())
+  owner    String
+  metadata String
+  user     User   @relation(fields: [owner], references: [owner])
+}
+
+model Nonce {
+  address   String @id
+  nonce     String
+}

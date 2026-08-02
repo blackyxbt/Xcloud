@@ -1,0 +1,194 @@
+//server.js
+
+const express = require("express")
+const multer = require("multer")
+const cors = require("cors")
+const fs = require("fs")
+const path = require("path")
+const crypto = require("crypto")
+const { ethers } = require("ethers")
+const sessions = {}
+
+const NONCES_PATH = path.join(__dirname, "nonces.json")
+const DB_PATH = path.join(__dirname, "db.json")
+const FILES_PATH = path.join(__dirname, "files")
+
+if (!fs.existsSync(NONCES_PATH)) fs.writeFileSync(NONCES_PATH, "{}")
+if (!fs.existsSync(DB_PATH)) fs.writeFileSync(DB_PATH, "[]")
+if (!fs.existsSync(FILES_PATH)) fs.mkdirSync(FILES_PATH)
+
+function verifyWallet(req){
+  const token = req.headers["x-session"]
+  if (!token) return null
+  return sessions[token] || null
+}
+
+const app = express()
+app.use(cors())
+app.use(express.json())
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+})
+
+app.post("/nonce", (req, res) => {
+  const { address } = req.body
+  if (!address) return res.sendStatus(400)
+
+  const nonces = JSON.parse(fs.readFileSync(NONCES_PATH))
+  const key = address.toLowerCase()
+
+  if (!nonces[key]) {
+    nonces[key] = crypto.randomBytes(32).toString("hex")
+    fs.writeFileSync(NONCES_PATH, JSON.stringify(nonces, null, 2))
+  }
+
+  res.json({ nonce: nonces[key] })
+})
+
+app.post("/login", (req,res) => {
+  const { address, signature} = req.body
+
+  const nonces = JSON.parse(fs.readFileSync(NONCES_PATH))
+  const key = address.toLowerCase()
+  const nonce = nonces[key]
+
+  if(!nonce) return res.sendStatus(401)
+
+  const message = `Login nonce:${nonce}`
+  const recovered = ethers.verifyMessage(message, signature)
+
+  if (recovered.toLowerCase() !== address.toLowerCase())
+    return res.sendStatus(401)
+
+  delete nonces[key]
+  fs.writeFileSync(NONCES_PATH, JSON.stringify(nonces, null, 2))
+  
+  const sessionToken = crypto.randomBytes(32).toString("hex")
+  sessions[sessionToken]= address
+
+  res.json({sessionToken})
+
+})
+
+app.post("/secret", (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+
+  const { encryptedSecret } = req.body
+  const db = JSON.parse(fs.readFileSync(DB_PATH))
+
+  let user = db.find(u => u.owner === owner)
+  if(!user){
+    user = { owner, encryptedSecret, files:[]}
+    db.push(user)
+  } else {
+    user.encryptedSecret = encryptedSecret
+  }
+
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2))
+  res.sendStatus(200)
+})
+
+app.get("/secret", (req, res) =>{
+  const owner = verifyWallet(req)
+  if(!owner) return res.sendStatus(401)
+
+  const db = JSON.parse(fs.readFileSync(DB_PATH))
+  const user = db.find(u => u.owner === owner)
+  if(!user) return res.json(null)
+
+  res.json({ encryptedSecret: user.encryptedSecret })
+})
+
+app.post("/upload", upload.fields([
+  { name: "file", maxCount: 1 },
+  { name: "metadata", maxCount: 1 }
+]), (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+  
+  const db = JSON.parse(fs.readFileSync(DB_PATH))
+
+  let user = db.find(u => u.owner === owner)
+  if(!user){
+    user = { owner, encryptedSecret: null, files:[]}
+    db.push(user)
+  }
+
+  const id = crypto.randomUUID()
+  const filePath = path.join(FILES_PATH, id)
+
+  fs.writeFileSync(filePath, req.files.file[0].buffer)
+  user.files.push({
+    id,
+    metadata: req.body.metadata
+  })
+
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2))
+  res.json({ success: true })
+})
+
+app.get("/files", (req,res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+  
+  const db = JSON.parse(fs.readFileSync(DB_PATH))
+  const user = db.find(u => u.owner === owner)
+  if (!user) return res.json([])
+
+  res.json(user.files)
+})
+
+app.get("/download/:id", (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+
+  const db = JSON.parse(fs.readFileSync(DB_PATH))
+  const user = db.find(u => u.owner === owner)
+  if (!user) return res.sendStatus(403)
+
+  const file = user.files.find(f => f.id === req.params.id)
+  if (!file) return res.sendStatus(403)
+
+  const filePath = path.join(FILES_PATH, req.params.id)
+  if (!fs.existsSync(filePath)) return res.sendStatus(404)
+
+  res.setHeader("Content-Type", "application/octet-stream")
+  res.setHeader("Content-Disposition", "attachment")
+
+  fs.createReadStream(filePath).pipe(res)
+})
+
+app.delete("/files/:id", (req, res) => {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+
+  const { id } = req.params
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return res.sendStatus(400)
+  }
+
+  const db = JSON.parse(fs.readFileSync(DB_PATH))
+  const user = db.find(u => u.owner === owner)
+  if (!user) return res.sendStatus(403)
+
+  const fileIndex = user.files.findIndex(f => f.id === id)
+  if (fileIndex === -1) return res.sendStatus(403)
+
+  const filesRoot = path.resolve(FILES_PATH)
+  const filePath = path.resolve(filesRoot, id)
+  if (!filePath.startsWith(filesRoot + path.sep)) return res.sendStatus(400)
+
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    user.files.splice(fileIndex, 1)
+    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2))
+    res.json({ success: true })
+  } catch (err) {
+    res.sendStatus(500)
+  }
+})
+
+app.listen(4000, () => console.log("Backend running on 4000"))
