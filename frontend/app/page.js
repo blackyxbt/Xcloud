@@ -168,12 +168,30 @@ export default function Home() {
     setFiles(decryptedFiles)
   }
 
+  function waitForEthereum(timeout = 3000) {
+    return new Promise((resolve) => {
+      if (window.ethereum) return resolve(window.ethereum)
+
+      const onInit = () => {
+        window.removeEventListener("ethereum#initialized", onInit)
+        resolve(window.ethereum)
+      }
+      window.addEventListener("ethereum#initialized", onInit, { once: true })
+
+      setTimeout(() => {
+        window.removeEventListener("ethereum#initialized", onInit)
+        resolve(window.ethereum || null)
+      }, timeout)
+    })
+  }
+
   async function connectWallet() {
-    if (!window.ethereum) return alert("Install Wallet")
+    const ethereum = await waitForEthereum()
+    if (!ethereum) return alert("Install Wallet")
 
     try {
       setIsConnecting(true)
-      const provider = new ethers.BrowserProvider(window.ethereum)
+      const provider = new ethers.BrowserProvider(ethereum)
       await provider.send("eth_requestAccounts", [])
 
       const signer = await provider.getSigner()
