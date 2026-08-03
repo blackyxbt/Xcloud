@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { ethers } from 'ethers'
 import { ArrowBigDownIcon, ArrowBigUpDashIcon, TrashIcon } from "./icons"
 
-const API_URL = "http://localhost:4000"
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"
 
 function formatBytes(bytes = 0) {
   if (!bytes) return "0 B"

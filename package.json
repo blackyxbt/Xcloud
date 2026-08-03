@@ -1,7 +1,5 @@
 {
   "dependencies": {
-    "ethers": "^6.16.0",
     "motion": "^12.24.10",
-    "next": "^16.1.1"
   }
 }
