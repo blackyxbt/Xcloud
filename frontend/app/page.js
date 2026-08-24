@@ -218,8 +218,9 @@ export default function Home() {
 
       const unlockMessage = `PrivateCloud Master Unlock v1
       Address: ${address.toLowerCase()}`
+      const unlockSignature = await signer.signMessage(unlockMessage)
 
-      const unlockKey = await deriveKeyFromMessage(unlockMessage)
+      const unlockKey = await deriveKeyFromMessage(unlockSignature)
 
       const secretRes = await fetch(`${API_URL}/secret`, {
         headers: { "x-session": sessionToken }
@@ -247,7 +248,30 @@ export default function Home() {
           atob(secretData.encryptedSecret),
           c => c.charCodeAt(0)
         )
-        userSecret = await decryptBytes(encryptedSecretBytes, unlockKey)
+
+        try {
+          // Fast path: already migrated to the signature-derived key.
+          userSecret = await decryptBytes(encryptedSecretBytes, unlockKey)
+        } catch {
+          // Fell through: this secret predates the fix and was wrapped with
+          // the old, insecure address-derived key. Recover it once with the
+          // legacy derivation, then immediately re-wrap with the new key so
+          // this branch never has to run again for this user.
+          const legacyUnlockKey = await deriveKeyFromMessage(unlockMessage)
+          userSecret = await decryptBytes(encryptedSecretBytes, legacyUnlockKey)
+
+          const migratedSecret = await encryptBytes(userSecret, unlockKey)
+          await fetch(`${API_URL}/secret`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-session": sessionToken
+            },
+            body: JSON.stringify({
+              encryptedSecret: btoa(String.fromCharCode(...migratedSecret))
+            })
+          })
+        }
       }
 
       const aesKey = await importAesKey(userSecret)
