@@ -15,6 +15,16 @@ const USDG_TOKEN_ADDRESS = process.env.USDG_TOKEN_ADDRESS?.toLowerCase()
 const ONE_TIME_PAYMENT_USDG = process.env.ONE_TIME_PAYMENT_USDG || "2"
 const rpcProvider = new ethers.JsonRpcProvider(PAYMENT_RPC_URL, PAYMENT_CHAIN_ID)
 const ERC20_INTERFACE = new ethers.Interface(["event Transfer(address indexed from, address indexed to, uint256 value)"])
+const allowedOrigins = new Set([
+  "http://localhost:3000",
+  "https://nobreach.site",
+  "https://www.nobreach.site",
+  ...[process.env.FRONTEND_URL, process.env.FRONTEND_URLS]
+    .filter(Boolean)
+    .flatMap(value => value.split(","))
+    .map(origin => origin.trim().replace(/\/+$/, ""))
+    .filter(Boolean)
+])
 
 function verifyWallet(req){
   const token = req.headers["x-session"]
@@ -36,7 +46,7 @@ async function requirePaidWallet(req, res, next) {
 const app = express()
 
 app.use(cors({
-  origin: process.env.FRONTEND_URL || "http://localhost:3000"
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin))
 }))
 
 app.use(express.json())
