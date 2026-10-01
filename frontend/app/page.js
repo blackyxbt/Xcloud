@@ -6,6 +6,14 @@ import { ArrowBigDownIcon, ArrowBigUpDashIcon, TrashIcon } from "./icons"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"
 
+const ROBINHOOD_CHAIN = {
+  chainId: "0x1237",
+  chainName: "Robinhood Chain",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://rpc.mainnet.chain.robinhood.com"],
+  blockExplorerUrls: ["https://robinhoodchain.blockscout.com"]
+}
+
 function formatBytes(bytes = 0) {
   if (!bytes) return "0 B"
   const units = ["B", "KB", "MB", "GB"]
@@ -128,9 +136,14 @@ export default function Home() {
   const [session, setSession] = useState(null)
   const [walletAddress, setWalletAddress] = useState("")
   const [isConnecting, setIsConnecting] = useState(false)
+  const [isWalletModalOpen, setIsWalletModalOpen] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [deletingFileId, setDeletingFileId] = useState(null)
   const [theme, setTheme] = useState("light")
+  const [chainName, setChainName] = useState("")
+  const [paymentSession, setPaymentSession] = useState(null)
+  const [isPaying, setIsPaying] = useState(false)
+  const [paymentAsset, setPaymentAsset] = useState("ETH")
 
   const totalStorage = files.reduce((sum, file) => sum + (file.meta.size || 0), 0)
   const latestUpload = files.reduce((latest, file) => Math.max(latest, file.meta.uploadedAt || 0), 0)
@@ -185,52 +198,70 @@ export default function Home() {
     })
   }
 
-  async function connectWallet() {
-    const ethereum = await waitForEthereum()
-    if (!ethereum) return alert("Install Wallet")
+  async function connectRobinhoodChain(ethereum) {
+    const currentChainId = await ethereum.request({ method: "eth_chainId" })
+    if (currentChainId !== ROBINHOOD_CHAIN.chainId) {
+      try {
+        await ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: ROBINHOOD_CHAIN.chainId }]
+        })
+      } catch (error) {
+        if (error?.code !== 4902) throw error
+        await ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [ROBINHOOD_CHAIN]
+        })
+      }
+    }
+    setChainName(ROBINHOOD_CHAIN.chainName)
+  }
 
-    try {
-      setIsConnecting(true)
-      const provider = new ethers.BrowserProvider(ethereum)
-      await provider.send("eth_requestAccounts", [])
+  async function authenticateWallet(ethereum) {
+    const provider = new ethers.BrowserProvider(ethereum)
+    await provider.send("eth_requestAccounts", [])
 
-      const signer = await provider.getSigner()
-      const address = await signer.getAddress()
+    const signer = await provider.getSigner()
+    const address = await signer.getAddress()
 
-      const nonceRes = await fetch(`${API_URL}/nonce`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address })
-      })
+    const nonceRes = await fetch(`${API_URL}/nonce`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address })
+    })
 
-      const { nonce } = await nonceRes.json()
-      const signature = await signer.signMessage(`Login nonce:${nonce}`)
+    const { nonce } = await nonceRes.json()
+    const signature = await signer.signMessage(`Login nonce:${nonce}`)
 
-      const loginRes = await fetch(`${API_URL}/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address, signature })
-      })
+    const loginRes = await fetch(`${API_URL}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address, signature })
+    })
 
-      if (!loginRes.ok) throw new Error("Login Failed")
+    if (!loginRes.ok) throw new Error("Login Failed")
 
-      const { sessionToken } = await loginRes.json()
+      const { sessionToken, paymentRequired } = await loginRes.json()
 
-      const unlockMessage = `PrivateCloud Master Unlock v1
+      if (paymentRequired) {
+        return { paymentRequired: true, sessionToken, address, signer }
+      }
+
+    const unlockMessage = `PrivateCloud Master Unlock v1
       Address: ${address.toLowerCase()}`
-      const unlockSignature = await signer.signMessage(unlockMessage)
+    const unlockSignature = await signer.signMessage(unlockMessage)
 
-      const unlockKey = await deriveKeyFromMessage(unlockSignature)
+    const unlockKey = await deriveKeyFromMessage(unlockSignature)
 
-      const secretRes = await fetch(`${API_URL}/secret`, {
-        headers: { "x-session": sessionToken }
-      })
+    const secretRes = await fetch(`${API_URL}/secret`, {
+      headers: { "x-session": sessionToken }
+    })
 
-      const secretData = await secretRes.json()
+    const secretData = await secretRes.json()
 
-      let userSecret
+    let userSecret
 
-      if (!secretData) {
+      if (!secretData?.encryptedSecret) {
         userSecret = randomBytes(32)
         const encryptedSecret = await encryptBytes(userSecret, unlockKey)
         await fetch(`${API_URL}/secret`, {
@@ -243,7 +274,7 @@ export default function Home() {
             encryptedSecret: btoa(String.fromCharCode(...encryptedSecret))
           })
         })
-      } else {
+    } else {
         const encryptedSecretBytes = Uint8Array.from(
           atob(secretData.encryptedSecret),
           c => c.charCodeAt(0)
@@ -272,20 +303,63 @@ export default function Home() {
             })
           })
         }
-      }
+    }
 
-      const aesKey = await importAesKey(userSecret)
+    const aesKey = await importAesKey(userSecret)
 
-      setSession(sessionToken)
-      setCryptoKey(aesKey)
-      setWalletAddress(address)
-      await listFiles(sessionToken, aesKey)
-      setConnected(true)
+    setSession(sessionToken)
+    setCryptoKey(aesKey)
+    setWalletAddress(address)
+    await listFiles(sessionToken, aesKey)
+    setConnected(true)
+  }
+
+  async function connectWallet() {
+    const ethereum = await waitForEthereum()
+    if (!ethereum) return alert("Install or unlock a browser wallet, then try again.")
+
+    try {
+      setIsConnecting(true)
+      setIsWalletModalOpen(false)
+      await connectRobinhoodChain(ethereum)
+      const result = await authenticateWallet(ethereum)
+      if (result?.paymentRequired) setPaymentSession(result)
     } catch (err) {
       console.error(err)
       alert("Login failed")
     } finally {
       setIsConnecting(false)
+    }
+  }
+
+  async function completeOneTimePayment() {
+    if (!paymentSession) return
+    try {
+      setIsPaying(true)
+      const optionsRes = await fetch(`${API_URL}/payment/options`)
+      const options = await optionsRes.json()
+      if (!optionsRes.ok) throw new Error(options.error || "Payment is unavailable")
+      const payment = options.options.find(option => option.asset === paymentAsset)
+      if (!payment) throw new Error(`${paymentAsset} payments are not configured yet`)
+      const transaction = payment.type === "native"
+        ? await paymentSession.signer.sendTransaction({ to: options.receiver, value: ethers.parseEther(payment.amount) })
+        : await new ethers.Contract(payment.tokenAddress, ["function transfer(address to, uint256 value) returns (bool)"], paymentSession.signer)
+          .transfer(options.receiver, ethers.parseUnits(payment.amount, payment.decimals))
+      await transaction.wait()
+      const verifyRes = await fetch(`${API_URL}/payment/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-session": paymentSession.sessionToken },
+        body: JSON.stringify({ txHash: transaction.hash, asset: payment.asset })
+      })
+      const verified = await verifyRes.json()
+      if (!verifyRes.ok) throw new Error(verified.error || "Payment verification failed")
+      setPaymentSession(null)
+      alert("Payment confirmed. Connect your wallet once more to open the vault.")
+    } catch (error) {
+      console.error(error)
+      alert(error.message || "Payment failed")
+    } finally {
+      setIsPaying(false)
     }
   }
 
@@ -325,28 +399,31 @@ export default function Home() {
   }
 
   async function downloadFile(file) {
-    const downloadRes = await fetch(
-      `${API_URL}/download/${encodeURIComponent(file.id)}`,
-      { headers: { "x-session": session } }
-    )
+    try {
+      const downloadRes = await fetch(
+        `${API_URL}/download/${encodeURIComponent(file.id)}`,
+        { headers: { "x-session": session } }
+      )
 
-    if (!downloadRes.ok) {
-      alert("Download failed")
-      return
+      if (!downloadRes.ok) throw new Error(`Storage request failed (${downloadRes.status})`)
+
+      const encryptedBytes = new Uint8Array(await downloadRes.arrayBuffer())
+      if (encryptedBytes.length < 13) throw new Error("Stored file is incomplete")
+
+      const decrypted = await decryptFile(encryptedBytes, cryptoKey)
+      const fileDownload = new Blob([decrypted], { type: file.meta.type })
+      const url = URL.createObjectURL(fileDownload)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = file.meta.name
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (error) {
+      console.error("Download failed", error)
+      alert(error.message || "Download failed")
     }
-
-    const encryptedBytes = new Uint8Array(await downloadRes.arrayBuffer())
-    const decrypted = await decryptFile(encryptedBytes, cryptoKey)
-    const fileDownload = new Blob([decrypted], { type: file.meta.type })
-
-    const url = URL.createObjectURL(fileDownload)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = file.meta.name
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
   }
 
   async function deleteFile(file) {
@@ -379,6 +456,14 @@ export default function Home() {
     <main>
       {!connected ? (
         <div className="auth-container">
+          <div className="utility-bar">
+            <span>NoBreach Protocol</span>
+            <div className="utility-links">
+              <span>Twitter / Soon</span>
+              <span>CA / Soon</span>
+              <span>Robinhood Chain / 4663</span>
+            </div>
+          </div>
           <button className="theme-toggle auth-theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
             <span>{theme === "dark" ? "Light" : "Dark"}</span>
           </button>
@@ -386,13 +471,19 @@ export default function Home() {
           <section className="auth-card">
             <div className="auth-left">
               <div className="brand-mark">PC</div>
-              <p className="eyebrow">Encrypted wallet storage</p>
-              <h1 className="auth-title">PrivateCloud</h1>
+              <p className="eyebrow">NoBreach Protocol / encrypted wallet storage</p>
+              <h1 className="auth-title">NoBreach</h1>
               <p className="auth-text">
-                Access private files with wallet-based login and local encryption before anything reaches the server.
+                Your files are encrypted in the browser before storage. Your wallet proves access on Robinhood Chain, without a password or conventional cloud account.
               </p>
 
-              <button className="connect-btn" onClick={connectWallet} disabled={isConnecting}>
+              <div className="network-badge">
+                <span className="network-dot" aria-hidden="true" />
+                <span>Robinhood Chain</span>
+                <small>Chain 4663</small>
+              </div>
+
+              <button className="connect-btn" onClick={() => setIsWalletModalOpen(true)} disabled={isConnecting}>
                 {isConnecting ? "Connecting..." : "Connect Wallet"}
               </button>
 
@@ -405,7 +496,7 @@ export default function Home() {
               <div className="vault-preview" aria-hidden="true">
                 <div className="vault-topline">
                   <span>Vault status</span>
-                  <strong>Locked</strong>
+                  <strong>Ready to unlock</strong>
                 </div>
                 <div className="vault-ring">
                   <span>256</span>
@@ -416,22 +507,115 @@ export default function Home() {
                   <strong>Encrypted</strong>
                 </div>
                 <div className="vault-row">
-                  <span>Identity</span>
-                  <strong>Wallet signed</strong>
+                  <span>Network</span>
+                  <strong>Robinhood Chain</strong>
                 </div>
               </div>
             </div>
           </section>
+
+          <section className="scroll-section no-breach-section">
+            <div className="section-heading">
+              <div><p className="eyebrow">NoBreach Protocol</p><h2>Built to reduce the breach surface.</h2></div>
+              <p>NoBreach keeps the encryption and access path deliberately short: encrypt locally, store ciphertext, unlock with a wallet signature.</p>
+            </div>
+            <div className="no-breach-grid">
+              <article><span>01 / No password database</span><h3>No password to leak.</h3><p>There is no NoBreach password for us to store, reset, or expose. Your wallet signs a challenge to prove that you control the address.</p></article>
+              <article><span>02 / Local encryption</span><h3>Plaintext stays on your device.</h3><p>Files are encrypted in your browser before upload. Storage receives an encrypted payload, not the readable original.</p></article>
+              <article><span>03 / Wallet-owned access</span><h3>No traditional user account.</h3><p>Your wallet address is your identity. There is no email login, password reset flow, or conventional account credential to take over.</p></article>
+              <article><span>04 / Practical ownership</span><h3>Your wallet, your responsibility.</h3><p>Only use a wallet you control and protect its recovery phrase. Losing wallet control can also mean losing access to the vault.</p></article>
+            </div>
+          </section>
+
+          {paymentSession && (
+            <section className="payment-panel">
+              <p className="eyebrow">One-time vault activation</p>
+              <h2>Activate your private vault.</h2>
+              <div className="payment-choices">
+                <button className={paymentAsset === "ETH" ? "is-selected" : ""} onClick={() => setPaymentAsset("ETH")}>0.0002 ETH</button>
+                <button className={paymentAsset === "USDG" ? "is-selected" : ""} onClick={() => setPaymentAsset("USDG")}>2 USDG</button>
+                <button disabled>Stock tokens / soon</button>
+              </div>
+              <div className="payment-summary"><span>Network</span><strong>Robinhood Chain</strong><span>Method</span><strong>{paymentAsset}</strong><span>Wallet</span><strong>{paymentSession.address.slice(0, 6)}...{paymentSession.address.slice(-4)}</strong></div>
+              <button className="connect-btn" onClick={completeOneTimePayment} disabled={isPaying}>{isPaying ? "Confirming payment..." : `Pay with ${paymentAsset}`}</button>
+            </section>
+          )}
+
+          <section className="scroll-section protocol-section">
+            <div className="section-heading">
+              <div><p className="eyebrow">Protocol flow</p><h2>Local first. Wallet verified.</h2></div>
+              <p>Every file follows a short, visible path. Encryption happens before storage; your wallet only proves access.</p>
+            </div>
+            <div className="flow-chart" aria-label="NoBreach encryption flow">
+              <article><span>01</span><strong>Wallet</strong><small>Signature identity</small></article>
+              <i aria-hidden="true" />
+              <article><span>02</span><strong>Browser</strong><small>AES-256 encryption</small></article>
+              <i aria-hidden="true" />
+              <article><span>03</span><strong>Vault</strong><small>Encrypted payload</small></article>
+              <i aria-hidden="true" />
+              <article><span>04</span><strong>Device</strong><small>Local decryption</small></article>
+            </div>
+          </section>
+
+          <section className="scroll-section technical-section">
+            <div className="section-heading"><div><p className="eyebrow">Technical details</p><h2>Built for private access.</h2></div></div>
+            <div className="technical-table" role="table" aria-label="NoBreach technical details">
+              <div role="row"><span role="cell">Network</span><strong role="cell">Robinhood Chain</strong><code role="cell">eip155:4663</code></div>
+              <div role="row"><span role="cell">Authentication</span><strong role="cell">Wallet signature</strong><code role="cell">EIP-1193</code></div>
+              <div role="row"><span role="cell">File encryption</span><strong role="cell">AES-GCM 256-bit</strong><code role="cell">Web Crypto API</code></div>
+              <div role="row"><span role="cell">Key derivation</span><strong role="cell">HKDF / SHA-256</strong><code role="cell">Client-side</code></div>
+              <div role="row"><span role="cell">Metadata</span><strong role="cell">Encrypted at rest</strong><code role="cell">JSON + AES-GCM</code></div>
+            </div>
+          </section>
+
+          <section className="scroll-section capability-section">
+            <div><p className="eyebrow">Session capabilities</p><h2>One signature<br />opens the vault.</h2></div>
+            <div className="capability-grid">
+              <div><span>Files</span><strong>Encrypted</strong><small>Before upload</small></div>
+              <div><span>Metadata</span><strong>Private</strong><small>Before storage</small></div>
+              <div><span>Access</span><strong>Signed</strong><small>Per session</small></div>
+              <button className="connect-btn" onClick={() => setIsWalletModalOpen(true)} disabled={isConnecting}>{isConnecting ? "Connecting..." : "Connect Wallet"}</button>
+            </div>
+          </section>
+
+          <section className="scroll-section faq-section">
+            <div className="section-heading"><div><p className="eyebrow">FAQ</p><h2>Questions before you connect.</h2></div></div>
+            <div className="faq-list">
+              <details open><summary>What is NoBreach Protocol?</summary><p>It is NoBreach's wallet-first access and client-side encryption model. Files are encrypted before upload, while a wallet signature verifies access to the vault.</p></details>
+              <details><summary>Can NoBreach read my uploaded files?</summary><p>The intended design encrypts files in your browser before they are sent to storage. The storage layer receives encrypted bytes rather than the readable file.</p></details>
+              <details><summary>Why is there no email or password login?</summary><p>Your wallet address acts as your identity. This avoids a separate password database and the usual password-reset or credential-stuffing path.</p></details>
+              <details><summary>Can my account be blocked like a normal cloud account?</summary><p>There is no conventional email-and-password account to suspend. Access still depends on your wallet, the app, and the underlying network and storage services being available.</p></details>
+              <details><summary>What happens if I lose my wallet?</summary><p>NoBreach cannot recover a wallet or its recovery phrase. Keep your wallet backup secure before storing important files.</p></details>
+            </div>
+          </section>
+
+          {isWalletModalOpen && (
+            <div className="wallet-modal-backdrop" role="presentation" onClick={() => setIsWalletModalOpen(false)}>
+              <section className="wallet-modal" role="dialog" aria-modal="true" aria-labelledby="wallet-modal-title" onClick={(event) => event.stopPropagation()}>
+                <button className="wallet-modal-close" onClick={() => setIsWalletModalOpen(false)} aria-label="Close wallet selection">x</button>
+                <p className="eyebrow">Robinhood Chain</p>
+                <h2 id="wallet-modal-title">Connect a wallet</h2>
+                <p>Choose an installed EVM wallet to access your NoBreach vault.</p>
+                <div className="wallet-options">
+                  <button onClick={connectWallet}><b>M</b><span><strong>MetaMask</strong><small>Browser wallet</small></span><i>&gt;</i></button>
+                  <button onClick={connectWallet}><b>C</b><span><strong>Coinbase Wallet</strong><small>Browser wallet</small></span><i>&gt;</i></button>
+                  <button onClick={connectWallet}><b>+</b><span><strong>Other EVM wallet</strong><small>Injected provider</small></span><i>&gt;</i></button>
+                </div>
+                <small className="wallet-modal-note">Your wallet will request approval before NoBreach can continue.</small>
+              </section>
+            </div>
+          )}
         </div>
       ) : (
         <div className="app-container">
           <header className="app-header">
             <div>
               <p className="eyebrow">Secure vault</p>
-              <h1 className="app-logo">PrivateCloud</h1>
+              <h1 className="app-logo">NoBreach</h1>
             </div>
 
             <div className="header-actions">
+              <span className="header-network"><i aria-hidden="true" />Robinhood Chain</span>
               <button className="theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
                 <span>{theme === "dark" ? "Light" : "Dark"}</span>
               </button>
@@ -477,7 +661,7 @@ export default function Home() {
                   <div className="empty-state">
                     <div className="empty-icon">+</div>
                     <h3>No files uploaded</h3>
-                    <p>Upload your first file to encrypt it locally and store it in your private cloud.</p>
+                    <p>Upload your first file to encrypt it locally and store it in your private vault.</p>
                   </div>
                 ) : files.map(file => (
                   <div key={file.id} className="file-item">
@@ -522,13 +706,29 @@ export default function Home() {
                 <span>Wallet</span>
                 <strong>{walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</strong>
               </div>
+              <div className="session-card network-session">
+                <span>Network</span>
+                <strong><i aria-hidden="true" />{chainName || ROBINHOOD_CHAIN.chainName}</strong>
+              </div>
               <div className="check-list">
                 <span>Local encryption</span>
                 <span>Signed access</span>
-                <span>Encrypted metadata</span>
+                <span>Robinhood Chain connected</span>
               </div>
             </aside>
           </div>
+
+          <section className="vault-guide">
+            <div className="guide-heading">
+              <p className="eyebrow">Vault workflow</p>
+              <h2>Your files, under your control.</h2>
+            </div>
+            <div className="guide-steps">
+              <article><span>01</span><strong>Add a file</strong><p>Select any file and it is encrypted in this browser before upload.</p></article>
+              <article><span>02</span><strong>Keep your key</strong><p>Your wallet signature derives the key that unlocks your encrypted vault.</p></article>
+              <article><span>03</span><strong>Retrieve securely</strong><p>Downloads are decrypted locally and never leave your device unprotected.</p></article>
+            </div>
+          </section>
         </div>
       )}
     </main>

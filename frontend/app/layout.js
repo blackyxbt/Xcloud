@@ -1,7 +1,7 @@
 import './globals.css'
 
 export const metadata = {
-  title: 'PrivateCloud',
+  title: 'NoBreach',
   description: 'Encrypted storage'
 }
 

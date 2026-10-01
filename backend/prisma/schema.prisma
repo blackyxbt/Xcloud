@@ -15,7 +15,21 @@ model User {
   id              String  @id @default(uuid())
   owner           String  @unique
   encryptedSecret String?
+  legacyAccessAt  DateTime?
   files           File[]
+  payments        Payment[]
+}
+
+model Payment {
+  id        String   @id @default(uuid())
+  owner     String
+  txHash    String   @unique
+  asset     String
+  amount    String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [owner], references: [owner])
+
+  @@index([owner])
 }
 
 model File {

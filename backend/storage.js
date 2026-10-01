@@ -7,9 +7,13 @@ const {
     DeleteObjectCommand
 } = require("@aws-sdk/client-s3");
 
+const endpoint = process.env.R2_ENDPOINT?.startsWith("http")
+    ? process.env.R2_ENDPOINT
+    : `https://${process.env.R2_ENDPOINT}`
+
 const client = new S3Client({
     region: "auto",
-    endpoint: process.env.R2_ENDPOINT,
+    endpoint,
     forcePathStyle: true,
     credentials: {
         accessKeyId: process.env.R2_ACCESS_KEY_ID,

@@ -7,11 +7,34 @@ const { PrismaClient } = require("@prisma/client")
 const storage = require("./storage")
 const prisma = new PrismaClient()
 const sessions = {}
+const PAYMENT_CHAIN_ID = 4663
+const PAYMENT_RPC_URL = process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"
+const PAYMENT_RECEIVER = process.env.PAYMENT_RECEIVER?.toLowerCase()
+const ONE_TIME_PAYMENT_ETH = process.env.ONE_TIME_PAYMENT_ETH || "0.002"
+const USDG_TOKEN_ADDRESS = process.env.USDG_TOKEN_ADDRESS?.toLowerCase()
+const ONE_TIME_PAYMENT_USDG = process.env.ONE_TIME_PAYMENT_USDG || "2"
+const rpcProvider = new ethers.JsonRpcProvider(PAYMENT_RPC_URL, PAYMENT_CHAIN_ID)
+const ERC20_INTERFACE = new ethers.Interface(["event Transfer(address indexed from, address indexed to, uint256 value)"])
 
 function verifyWallet(req){
   const token = req.headers["x-session"]
   if (!token) return null
   return sessions[token] || null
+}
+
+async function requirePaidWallet(req, res, next) {
+  const owner = verifyWallet(req)
+  if (!owner) return res.sendStatus(401)
+  const user = await prisma.user.findFirst({
+    where: { owner: { equals: owner, mode: "insensitive" } },
+    select: { legacyAccessAt: true }
+  })
+  const payment = await prisma.payment.findFirst({
+    where: { owner: { equals: owner, mode: "insensitive" } }
+  })
+  if (!payment && !user?.legacyAccessAt) return res.status(402).json({ error: "One-time payment required" })
+  req.owner = owner
+  next()
 }
 
 const app = express()
@@ -88,15 +111,87 @@ app.post("/login", async (req,res) => {
   })
   
   const sessionToken = crypto.randomBytes(32).toString("hex")
-  sessions[sessionToken]= address
+  sessions[sessionToken] = address
 
-  res.json({sessionToken})
+  let user = await prisma.user.findUnique({ where: { owner: address } })
+  const payment = await prisma.payment.findFirst({
+    where: { owner: { equals: address, mode: "insensitive" } }
+  })
+  if (user && !payment && !user.legacyAccessAt) {
+    user = await prisma.user.update({ where: { owner: address }, data: { legacyAccessAt: new Date() } })
+  }
+
+  res.json({ sessionToken, paymentRequired: !payment && !user?.legacyAccessAt })
 
 })
 
-app.post("/secret", async (req, res) => {
+app.get("/payment/options", async (req, res) => {
+  if (!PAYMENT_RECEIVER || !ethers.isAddress(PAYMENT_RECEIVER)) return res.status(503).json({ error: "Payment receiver is not configured" })
+  const options = [{ asset: "ETH", amount: ONE_TIME_PAYMENT_ETH, type: "native" }]
+  if (USDG_TOKEN_ADDRESS && ethers.isAddress(USDG_TOKEN_ADDRESS)) {
+    options.push({ asset: "USDG", amount: ONE_TIME_PAYMENT_USDG, type: "erc20", tokenAddress: USDG_TOKEN_ADDRESS, decimals: 18 })
+  }
+  res.json({ receiver: PAYMENT_RECEIVER, chainId: PAYMENT_CHAIN_ID, options })
+})
+
+app.get("/payment/stock-tokens", async (req, res) => {
+  try {
+    const response = await fetch("https://api.robinhood.com/rhj/assets")
+    if (!response.ok) throw new Error("Asset registry request failed")
+    const { assets = [] } = await response.json()
+    const tokens = assets
+      .filter(asset => ["AAPL", "AMZN", "NVDA"].includes(asset.tokenSymbol))
+      .map(asset => ({
+        symbol: asset.tokenSymbol,
+        name: asset.tokenName,
+        contractAddress: asset.deployments?.find(deployment => deployment.chainId === PAYMENT_CHAIN_ID)?.contractAddress,
+        decimals: 18
+      }))
+      .filter(token => token.contractAddress)
+    res.json({ chainId: PAYMENT_CHAIN_ID, tokens })
+  } catch (error) {
+    console.error("Stock token lookup failed", error)
+    res.status(502).json({ error: "Robinhood stock token registry is unavailable" })
+  }
+})
+
+app.post("/payment/verify", async (req, res) => {
   const owner = verifyWallet(req)
-  if (!owner) return res.sendStatus(401)
+  const { txHash, asset = "ETH" } = req.body
+  if (!owner || !txHash || !ethers.isHexString(txHash, 32)) return res.sendStatus(400)
+  if (!PAYMENT_RECEIVER || !ethers.isAddress(PAYMENT_RECEIVER)) return res.status(503).json({ error: "Payment receiver is not configured" })
+  const existing = await prisma.payment.findFirst({ where: { owner } })
+  if (existing) return res.json({ paid: true, payment: existing })
+  try {
+    const [transaction, receipt] = await Promise.all([rpcProvider.getTransaction(txHash), rpcProvider.getTransactionReceipt(txHash)])
+    if (!transaction || !receipt || receipt.status !== 1 || transaction.chainId !== BigInt(PAYMENT_CHAIN_ID)) return res.status(400).json({ error: "Payment transaction is not confirmed on Robinhood Chain" })
+    if (transaction.from.toLowerCase() !== owner.toLowerCase()) return res.status(400).json({ error: "Payment sender does not match" })
+    let amount
+    if (asset === "ETH") {
+      if (transaction.to?.toLowerCase() !== PAYMENT_RECEIVER || transaction.value < ethers.parseEther(ONE_TIME_PAYMENT_ETH)) return res.status(400).json({ error: `Payment must be at least ${ONE_TIME_PAYMENT_ETH} ETH to the configured receiver` })
+      amount = ethers.formatEther(transaction.value)
+    } else if (asset === "USDG" && USDG_TOKEN_ADDRESS && ethers.isAddress(USDG_TOKEN_ADDRESS)) {
+      if (transaction.to?.toLowerCase() !== USDG_TOKEN_ADDRESS) return res.status(400).json({ error: "Payment was not sent through the configured USDG contract" })
+      const transfer = receipt.logs
+        .filter(log => log.address.toLowerCase() === USDG_TOKEN_ADDRESS)
+        .map(log => { try { return ERC20_INTERFACE.parseLog(log) } catch { return null } })
+        .find(log => log?.name === "Transfer" && log.args.from.toLowerCase() === owner && log.args.to.toLowerCase() === PAYMENT_RECEIVER)
+      if (!transfer || transfer.args.value < ethers.parseUnits(ONE_TIME_PAYMENT_USDG, 18)) return res.status(400).json({ error: `Payment must be at least ${ONE_TIME_PAYMENT_USDG} USDG` })
+      amount = ethers.formatUnits(transfer.args.value, 18)
+    } else {
+      return res.status(400).json({ error: "Unsupported payment asset" })
+    }
+    await prisma.user.upsert({ where: { owner }, update: {}, create: { owner } })
+    const payment = await prisma.payment.create({ data: { owner, txHash, asset, amount } })
+    res.json({ paid: true, payment })
+  } catch (error) {
+    console.error("Payment verification failed", error)
+    res.status(400).json({ error: "Payment transaction could not be verified" })
+  }
+})
+
+app.post("/secret", requirePaidWallet, async (req, res) => {
+  const owner = req.owner
 
   const { encryptedSecret } = req.body
 
@@ -112,9 +207,8 @@ app.post("/secret", async (req, res) => {
   res.sendStatus(200)
 })
 
-app.get("/secret", async (req, res) =>{
-  const owner = verifyWallet(req)
-  if(!owner) return res.sendStatus(401)
+app.get("/secret", requirePaidWallet, async (req, res) =>{
+  const owner = req.owner
 
   const user = await prisma.user.findUnique({
       where:{
@@ -122,19 +216,18 @@ app.get("/secret", async (req, res) =>{
       }
   })
 
-  if(!user) return res.json(null)
+  if(!user?.encryptedSecret) return res.json(null)
 
   res.json({
       encryptedSecret:user.encryptedSecret
   })
 })
 
-app.post("/upload", upload.fields([
+app.post("/upload", requirePaidWallet, upload.fields([
   { name: "file", maxCount: 1 },
   { name: "metadata", maxCount: 1 }
 ]), async (req, res) => {
-  const owner = verifyWallet(req)
-  if (!owner) return res.sendStatus(401)
+  const owner = req.owner
   
   if (!req.files?.file?.[0]) {
     return res.sendStatus(400)
@@ -170,9 +263,8 @@ app.post("/upload", upload.fields([
   res.json({ success: true })
 })
 
-app.get("/files", async (req,res) => {
-  const owner = verifyWallet(req)
-  if (!owner) return res.sendStatus(401)
+app.get("/files", requirePaidWallet, async (req,res) => {
+  const owner = req.owner
   
   const files = await prisma.file.findMany({
     where:{
@@ -184,9 +276,8 @@ app.get("/files", async (req,res) => {
 
 })
 
-app.get("/download/:id", async (req, res) => {
-  const owner = verifyWallet(req)
-  if (!owner) return res.sendStatus(401)
+app.get("/download/:id", requirePaidWallet, async (req, res) => {
+  const owner = req.owner
 
   const dbfile = await prisma.file.findFirst({
       where:{
@@ -214,14 +305,19 @@ app.get("/download/:id", async (req, res) => {
     r2file.Body.pipe(res)
 
   } catch (err) {
-    console.error(err)
-    res.sendStatus(404)
+    console.error("R2 download failed", {
+      code: err.Code || err.name,
+      status: err.$metadata?.httpStatusCode,
+      message: err.message
+    })
+    res.status(err.$metadata?.httpStatusCode === 404 ? 404 : 502).json({
+      error: "Encrypted file storage is unavailable"
+    })
   }
 })
 
-app.delete("/files/:id", async (req, res) => {
-  const owner = verifyWallet(req)
-  if (!owner) return res.sendStatus(401)
+app.delete("/files/:id", requirePaidWallet, async (req, res) => {
+  const owner = req.owner
 
   const { id } = req.params
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
