@@ -626,6 +626,9 @@ export default function Home() {
             </div>
 
             <div className="header-actions">
+              <a className="utility-docs" href="/docs">Docs</a>
+              <a className="x-link" href="https://x.com/NoBreachApp" target="_blank" rel="noreferrer" aria-label="NoBreach on X"><XIcon size={13} /><span></span></a>
+              <span className="header-ca">CA / Soon</span>
               <span className="header-network"><i aria-hidden="true" />Robinhood Chain</span>
               <button className="theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
                 <span>{theme === "dark" ? "Light" : "Dark"}</span>

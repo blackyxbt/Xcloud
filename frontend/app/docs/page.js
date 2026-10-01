@@ -1,4 +1,4 @@
-import { NoBreachMark } from "../icons"
+import { NoBreachMark, XIcon } from "../icons"
 
 const navigation = [
   ["Start here", ["Overview", "Security model", "Getting started"]],
@@ -18,7 +18,13 @@ export default function DocsPage() {
       <header className="docs-header">
         <a className="docs-brand" href="/"><img src="/brand/nobreach-logo-transparent.png" alt="NoBreach" /><span>Protocol</span></a>
         <nav aria-label="Documentation navigation"><a href="#overview">Protocol</a><a href="#security">Security</a><a href="#operations">Operations</a><a href="#reference">Reference</a></nav>
-        <a className="docs-connect" href="/">Open vault</a>
+        <div className="docs-header-actions">
+          <a className="utility-docs" href="/docs">Docs</a>
+          <a className="x-link" href="https://x.com/NoBreachApp" target="_blank" rel="noreferrer" aria-label="NoBreach on X"><XIcon size={13} /><span></span></a>
+          <span className="header-ca">CA / Soon</span>
+          <span className="header-network"><i aria-hidden="true" />Robinhood Chain</span>
+          <a className="docs-connect" href="/">Open vault</a>
+        </div>
       </header>
 
       <div className="docs-layout">
