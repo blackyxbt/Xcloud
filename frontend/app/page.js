@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { ethers } from 'ethers'
-import { ArrowBigDownIcon, ArrowBigUpDashIcon, TrashIcon } from "./icons"
+import { ArrowBigDownIcon, ArrowBigUpDashIcon, NoBreachMark, TrashIcon } from "./icons"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"
 
@@ -149,14 +149,13 @@ export default function Home() {
   const latestUpload = files.reduce((latest, file) => Math.max(latest, file.meta.uploadedAt || 0), 0)
 
   useEffect(() => {
-    const savedTheme = localStorage.getItem("privatecloud-theme")
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches
-    setTheme(savedTheme || (prefersDark ? "dark" : "light"))
+    const savedTheme = localStorage.getItem("nobreach-theme")
+    setTheme(savedTheme === "dark" ? "dark" : "light")
   }, [])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    localStorage.setItem("privatecloud-theme", theme)
+    localStorage.setItem("nobreach-theme", theme)
   }, [theme])
 
   function toggleTheme() {
@@ -457,8 +456,9 @@ export default function Home() {
       {!connected ? (
         <div className="auth-container">
           <div className="utility-bar">
-            <span>NoBreach Protocol</span>
+            <span className="protocol-brand"><img src="/brand/nobreach-logo-transparent.png" alt="NoBreach" /><span>Protocol</span></span>
             <div className="utility-links">
+              <a className="utility-docs" href="/docs">Docs</a>
               <span>Twitter / Soon</span>
               <span>CA / Soon</span>
               <span>Robinhood Chain / 4663</span>
@@ -470,7 +470,7 @@ export default function Home() {
 
           <section className="auth-card">
             <div className="auth-left">
-              <div className="brand-mark">PC</div>
+              <div className="brand-mark"><NoBreachMark size={32} /></div>
               <p className="eyebrow">NoBreach Protocol / encrypted wallet storage</p>
               <h1 className="auth-title">NoBreach</h1>
               <p className="auth-text">
@@ -611,7 +611,7 @@ export default function Home() {
           <header className="app-header">
             <div>
               <p className="eyebrow">Secure vault</p>
-              <h1 className="app-logo">NoBreach</h1>
+              <h1 className="app-logo"><img src="/brand/nobreach-logo-transparent.png" alt="NoBreach" /><span>Protocol</span></h1>
             </div>
 
             <div className="header-actions">

@@ -1,5 +1,22 @@
 'use client'
 
+export function NoBreachMark({ size = 32, className = "" }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M16 3 27 7v8.1c0 6.3-4.5 11.5-11 13.9C9.5 26.6 5 21.4 5 15.1V7L16 3Z" fill="currentColor" />
+      <path d="M10 21V11l12 10V11" stroke="var(--paper)" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter" />
+    </svg>
+  )
+}
+
 export function ArrowBigDownIcon({ size = 40, className = "" }) {
   return (
     <svg
