@@ -17,6 +17,22 @@ export function NoBreachMark({ size = 32, className = "" }) {
   )
 }
 
+export function XIcon({ size = 16, className = "" }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M18.9 2.25h3.68l-8.04 9.19L24 21.75h-7.4l-5.8-7.58-6.64 7.58H.48l8.6-9.83L0 2.25h7.58l5.24 6.93 6.08-6.93Zm-1.29 17.3h2.04L6.47 4.33H4.28L17.61 19.55Z" />
+    </svg>
+  )
+}
+
 export function ArrowBigDownIcon({ size = 40, className = "" }) {
   return (
     <svg

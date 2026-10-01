@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { ethers } from 'ethers'
-import { ArrowBigDownIcon, ArrowBigUpDashIcon, NoBreachMark, TrashIcon } from "./icons"
+import { ArrowBigDownIcon, ArrowBigUpDashIcon, NoBreachMark, TrashIcon, XIcon } from "./icons"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"
 
@@ -459,9 +459,9 @@ export default function Home() {
             <span className="protocol-brand"><img src="/brand/nobreach-logo-transparent.png" alt="NoBreach" /><span>Protocol</span></span>
             <div className="utility-links">
               <a className="utility-docs" href="/docs">Docs</a>
-              <span>Twitter / Soon</span>
+              <a className="x-link" href="https://x.com/NoBreachApp" target="_blank" rel="noreferrer" aria-label="NoBreach on X"><XIcon size={13} /><span></span></a>
               <span>CA / Soon</span>
-              <span>Robinhood Chain / 4663</span>
+              <span>Robinhood Chain</span>
             </div>
           </div>
           <button className="theme-toggle auth-theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
