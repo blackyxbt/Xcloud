@@ -158,6 +158,15 @@ export default function Home() {
     localStorage.setItem("nobreach-theme", theme)
   }, [theme])
 
+  useEffect(() => {
+    const targetId = paymentSession ? "payment-panel" : connected ? "vault" : null
+    if (targetId) {
+      requestAnimationFrame(() => {
+        document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "start" })
+      })
+    }
+  }, [paymentSession, connected])
+
   function toggleTheme() {
     setTheme(currentTheme => currentTheme === "dark" ? "light" : "dark")
   }
@@ -216,36 +225,7 @@ export default function Home() {
     setChainName(ROBINHOOD_CHAIN.chainName)
   }
 
-  async function authenticateWallet(ethereum) {
-    const provider = new ethers.BrowserProvider(ethereum)
-    await provider.send("eth_requestAccounts", [])
-
-    const signer = await provider.getSigner()
-    const address = await signer.getAddress()
-
-    const nonceRes = await fetch(`${API_URL}/nonce`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address })
-    })
-
-    const { nonce } = await nonceRes.json()
-    const signature = await signer.signMessage(`Login nonce:${nonce}`)
-
-    const loginRes = await fetch(`${API_URL}/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ address, signature })
-    })
-
-    if (!loginRes.ok) throw new Error("Login Failed")
-
-      const { sessionToken, paymentRequired } = await loginRes.json()
-
-      if (paymentRequired) {
-        return { paymentRequired: true, sessionToken, address, signer }
-      }
-
+  async function unlockVault(sessionToken, address, signer) {
     const unlockMessage = `PrivateCloud Master Unlock v1
       Address: ${address.toLowerCase()}`
     const unlockSignature = await signer.signMessage(unlockMessage)
@@ -313,6 +293,37 @@ export default function Home() {
     setConnected(true)
   }
 
+  async function authenticateWallet(ethereum) {
+    const provider = new ethers.BrowserProvider(ethereum)
+    await provider.send("eth_requestAccounts", [])
+
+    const signer = await provider.getSigner()
+    const address = await signer.getAddress()
+
+    const nonceRes = await fetch(`${API_URL}/nonce`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address })
+    })
+
+    const { nonce } = await nonceRes.json()
+    const signature = await signer.signMessage(`Login nonce:${nonce}`)
+
+    const loginRes = await fetch(`${API_URL}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address, signature })
+    })
+
+    if (!loginRes.ok) throw new Error("Login Failed")
+
+    const { sessionToken, paymentRequired } = await loginRes.json()
+    setWalletAddress(address)
+    if (paymentRequired) return { paymentRequired: true, sessionToken, address, signer }
+
+    await unlockVault(sessionToken, address, signer)
+  }
+
   async function connectWallet() {
     const ethereum = await waitForEthereum()
     if (!ethereum) return alert("Install or unlock a browser wallet, then try again.")
@@ -352,8 +363,8 @@ export default function Home() {
       })
       const verified = await verifyRes.json()
       if (!verifyRes.ok) throw new Error(verified.error || "Payment verification failed")
+      await unlockVault(paymentSession.sessionToken, paymentSession.address, paymentSession.signer)
       setPaymentSession(null)
-      alert("Payment confirmed. Connect your wallet once more to open the vault.")
     } catch (error) {
       console.error(error)
       alert(error.message || "Payment failed")
@@ -483,8 +494,8 @@ export default function Home() {
                 <small>Chain 4663</small>
               </div>
 
-              <button className="connect-btn" onClick={() => setIsWalletModalOpen(true)} disabled={isConnecting}>
-                {isConnecting ? "Connecting..." : "Connect Wallet"}
+              <button className="connect-btn" onClick={() => setIsWalletModalOpen(true)} disabled={isConnecting || Boolean(paymentSession)}>
+                {isConnecting ? "Connecting..." : paymentSession ? "Wallet Connected" : "Connect Wallet"}
               </button>
 
               <div className="auth-footer">
@@ -528,7 +539,7 @@ export default function Home() {
           </section>
 
           {paymentSession && (
-            <section className="payment-panel">
+            <section className="payment-panel" id="payment-panel">
               <p className="eyebrow">One-time vault activation</p>
               <h2>Activate your private vault.</h2>
               <div className="payment-choices">
@@ -574,7 +585,7 @@ export default function Home() {
               <div><span>Files</span><strong>Encrypted</strong><small>Before upload</small></div>
               <div><span>Metadata</span><strong>Private</strong><small>Before storage</small></div>
               <div><span>Access</span><strong>Signed</strong><small>Per session</small></div>
-              <button className="connect-btn" onClick={() => setIsWalletModalOpen(true)} disabled={isConnecting}>{isConnecting ? "Connecting..." : "Connect Wallet"}</button>
+              <button className="connect-btn" onClick={() => setIsWalletModalOpen(true)} disabled={isConnecting || Boolean(paymentSession)}>{isConnecting ? "Connecting..." : paymentSession ? "Wallet Connected" : "Connect Wallet"}</button>
             </div>
           </section>
 
@@ -607,7 +618,7 @@ export default function Home() {
           )}
         </div>
       ) : (
-        <div className="app-container">
+        <div className="app-container" id="vault">
           <header className="app-header">
             <div>
               <p className="eyebrow">Secure vault</p>

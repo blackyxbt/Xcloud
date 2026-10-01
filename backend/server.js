@@ -25,14 +25,10 @@ function verifyWallet(req){
 async function requirePaidWallet(req, res, next) {
   const owner = verifyWallet(req)
   if (!owner) return res.sendStatus(401)
-  const user = await prisma.user.findFirst({
-    where: { owner: { equals: owner, mode: "insensitive" } },
-    select: { legacyAccessAt: true }
-  })
   const payment = await prisma.payment.findFirst({
     where: { owner: { equals: owner, mode: "insensitive" } }
   })
-  if (!payment && !user?.legacyAccessAt) return res.status(402).json({ error: "One-time payment required" })
+  if (!payment) return res.status(402).json({ error: "One-time payment required" })
   req.owner = owner
   next()
 }
@@ -113,15 +109,11 @@ app.post("/login", async (req,res) => {
   const sessionToken = crypto.randomBytes(32).toString("hex")
   sessions[sessionToken] = address
 
-  let user = await prisma.user.findUnique({ where: { owner: address } })
   const payment = await prisma.payment.findFirst({
     where: { owner: { equals: address, mode: "insensitive" } }
   })
-  if (user && !payment && !user.legacyAccessAt) {
-    user = await prisma.user.update({ where: { owner: address }, data: { legacyAccessAt: new Date() } })
-  }
 
-  res.json({ sessionToken, paymentRequired: !payment && !user?.legacyAccessAt })
+  res.json({ sessionToken, paymentRequired: !payment })
 
 })
 
