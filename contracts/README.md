@@ -10,7 +10,7 @@ This project includes a Node.js deployment script; Foundry, Hardhat, and Remix
 are not required. From PowerShell:
 
 ```powershell
-Set-Location C:\Users\ROHITH\Xcloud\contracts
+Set-Location C:\Users\UserNameXcloud\contracts
 $env:RH_CHAIN_ID = "4663"
 $env:RH_RPC_URL = "https://rpc.mainnet.chain.robinhood.com"
 $secureKey = Read-Host -Prompt "Enter FRESH deployment wallet key (hidden)" -AsSecureString
