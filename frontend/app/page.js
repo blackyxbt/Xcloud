@@ -471,7 +471,7 @@ export default function Home() {
             <div className="utility-links">
               <a className="utility-docs" href="/docs">Docs</a>
               <a className="x-link" href="https://x.com/NoBreachApp" target="_blank" rel="noreferrer" aria-label="NoBreach on X"><XIcon size={13} /><span></span></a>
-              <span>CA / Soon</span>
+              <span>CA : 0x9e545052593BC326f84f257B7e4f73Cf6A8C2Cb3</span>
               <span>Robinhood Chain</span>
             </div>
           </div>
