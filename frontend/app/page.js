@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ethers } from 'ethers'
 import { ArrowBigDownIcon, ArrowBigUpDashIcon, NoBreachMark, TrashIcon, XIcon } from "./icons"
 
@@ -143,7 +143,11 @@ export default function Home() {
   const [chainName, setChainName] = useState("")
   const [paymentSession, setPaymentSession] = useState(null)
   const [isPaying, setIsPaying] = useState(false)
-  const [paymentAsset, setPaymentAsset] = useState("ETH")
+  const [paymentAsset, setPaymentAsset] = useState("NBP")
+  const [paymentOptions, setPaymentOptions] = useState(null)
+  const [pendingPayment, setPendingPayment] = useState(null)
+  const [paymentTxHash, setPaymentTxHash] = useState("")
+  const paymentOptionsRequest = useRef(null)
 
   const totalStorage = files.reduce((sum, file) => sum + (file.meta.size || 0), 0)
   const latestUpload = files.reduce((latest, file) => Math.max(latest, file.meta.uploadedAt || 0), 0)
@@ -151,6 +155,11 @@ export default function Home() {
   useEffect(() => {
     const savedTheme = localStorage.getItem("nobreach-theme")
     setTheme(savedTheme === "dark" ? "dark" : "light")
+  }, [])
+
+  useEffect(() => {
+    // This wakes a sleeping Render service before the user needs a wallet prompt.
+    void loadPaymentOptions().catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -167,8 +176,40 @@ export default function Home() {
     }
   }, [paymentSession, connected])
 
+  useEffect(() => {
+    if (!paymentSession) return
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("nobreach-pending-payment"))
+      if (saved?.owner?.toLowerCase() === paymentSession.address.toLowerCase() && saved.txHash && saved.asset) {
+        setPendingPayment(saved)
+        setPaymentAsset(saved.asset)
+      }
+    } catch {
+      sessionStorage.removeItem("nobreach-pending-payment")
+    }
+  }, [paymentSession])
+
   function toggleTheme() {
     setTheme(currentTheme => currentTheme === "dark" ? "light" : "dark")
+  }
+
+  async function loadPaymentOptions() {
+    if (paymentOptions) return paymentOptions
+    if (paymentOptionsRequest.current) return paymentOptionsRequest.current
+
+    paymentOptionsRequest.current = (async () => {
+      const response = await fetch(`${API_URL}/payment/options`)
+      const options = await response.json()
+      if (!response.ok) throw new Error(options.error || "Payment is unavailable")
+      setPaymentOptions(options)
+      return options
+    })()
+
+    try {
+      return await paymentOptionsRequest.current
+    } finally {
+      paymentOptionsRequest.current = null
+    }
   }
 
   async function listFiles(activeSession, activeKey) {
@@ -189,21 +230,37 @@ export default function Home() {
     setFiles(decryptedFiles)
   }
 
-  function waitForEthereum(timeout = 3000) {
-    return new Promise((resolve) => {
-      if (window.ethereum) return resolve(window.ethereum)
-
-      const onInit = () => {
-        window.removeEventListener("ethereum#initialized", onInit)
-        resolve(window.ethereum)
+  async function findInjectedProvider(wallet) {
+    const discovered = []
+    const addProvider = (provider, info = {}) => {
+      if (provider?.request && !discovered.some(entry => entry.provider === provider)) {
+        discovered.push({ provider, info })
       }
-      window.addEventListener("ethereum#initialized", onInit, { once: true })
+    }
 
-      setTimeout(() => {
-        window.removeEventListener("ethereum#initialized", onInit)
-        resolve(window.ethereum || null)
-      }, timeout)
-    })
+    // EIP-6963 lets extensions announce themselves without competing for
+    // window.ethereum, which is unreliable when users have several wallets.
+    const onAnnounce = (event) => addProvider(event.detail?.provider, event.detail?.info)
+    window.addEventListener("eip6963:announceProvider", onAnnounce)
+    window.dispatchEvent(new Event("eip6963:requestProvider"))
+    await new Promise(resolve => setTimeout(resolve, 150))
+    window.removeEventListener("eip6963:announceProvider", onAnnounce)
+
+    const injected = window.ethereum
+    for (const provider of injected?.providers || []) addProvider(provider)
+    addProvider(injected)
+    addProvider(window.okxwallet)
+    addProvider(window.okxwallet?.ethereum)
+    addProvider(window.okexchain)
+
+    const matchesWallet = {
+      metamask: entry => entry.provider.isMetaMask && !entry.provider.isOkxWallet,
+      okx: entry => entry.provider.isOkxWallet || /okx/i.test(`${entry.info?.rdns || ""} ${entry.info?.name || ""}`),
+      coinbase: entry => entry.provider.isCoinbaseWallet || /coinbase/i.test(`${entry.info?.rdns || ""} ${entry.info?.name || ""}`),
+      other: entry => !entry.provider.isMetaMask && !entry.provider.isOkxWallet && !entry.provider.isCoinbaseWallet
+    }
+
+    return (discovered.find(matchesWallet[wallet]) || (wallet === "other" ? discovered[0] : null))?.provider || null
   }
 
   async function connectRobinhoodChain(ethereum) {
@@ -296,6 +353,7 @@ export default function Home() {
   async function authenticateWallet(ethereum) {
     const provider = new ethers.BrowserProvider(ethereum)
     await provider.send("eth_requestAccounts", [])
+    await connectRobinhoodChain(ethereum)
 
     const signer = await provider.getSigner()
     const address = await signer.getAddress()
@@ -324,14 +382,13 @@ export default function Home() {
     await unlockVault(sessionToken, address, signer)
   }
 
-  async function connectWallet() {
-    const ethereum = await waitForEthereum()
-    if (!ethereum) return alert("Install or unlock a browser wallet, then try again.")
+  async function connectWallet(wallet) {
+    const ethereum = await findInjectedProvider(wallet)
+    if (!ethereum) return alert(`${wallet === "okx" ? "OKX Wallet" : wallet === "metamask" ? "MetaMask" : wallet === "coinbase" ? "Coinbase Wallet" : "An EVM wallet"} was not found. Install or unlock it, then try again.`)
 
     try {
       setIsConnecting(true)
       setIsWalletModalOpen(false)
-      await connectRobinhoodChain(ethereum)
       const result = await authenticateWallet(ethereum)
       if (result?.paymentRequired) setPaymentSession(result)
     } catch (err) {
@@ -346,24 +403,31 @@ export default function Home() {
     if (!paymentSession) return
     try {
       setIsPaying(true)
-      const optionsRes = await fetch(`${API_URL}/payment/options`)
-      const options = await optionsRes.json()
-      if (!optionsRes.ok) throw new Error(options.error || "Payment is unavailable")
+      const options = await loadPaymentOptions()
       const payment = options.options.find(option => option.asset === paymentAsset)
       if (!payment) throw new Error(`${paymentAsset} payments are not configured yet`)
-      const transaction = payment.type === "native"
-        ? await paymentSession.signer.sendTransaction({ to: options.receiver, value: ethers.parseEther(payment.amount) })
-        : await new ethers.Contract(payment.tokenAddress, ["function transfer(address to, uint256 value) returns (bool)"], paymentSession.signer)
-          .transfer(options.receiver, ethers.parseUnits(payment.amount, payment.decimals))
-      await transaction.wait()
+      let txHash = pendingPayment?.asset === payment.asset ? pendingPayment.txHash : null
+      if (!txHash) {
+        const transaction = payment.type === "native"
+          ? await paymentSession.signer.sendTransaction({ to: options.receiver, value: ethers.parseEther(payment.amount) })
+          : await new ethers.Contract(payment.tokenAddress, ["function transfer(address to, uint256 value) returns (bool)"], paymentSession.signer)
+            .transfer(options.receiver, ethers.parseUnits(payment.amount, payment.decimals))
+        txHash = transaction.hash
+        const savedPayment = { owner: paymentSession.address, asset: payment.asset, txHash }
+        setPendingPayment(savedPayment)
+        sessionStorage.setItem("nobreach-pending-payment", JSON.stringify(savedPayment))
+        await transaction.wait()
+      }
       const verifyRes = await fetch(`${API_URL}/payment/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-session": paymentSession.sessionToken },
-        body: JSON.stringify({ txHash: transaction.hash, asset: payment.asset })
+        body: JSON.stringify({ txHash, asset: payment.asset })
       })
       const verified = await verifyRes.json()
       if (!verifyRes.ok) throw new Error(verified.error || "Payment verification failed")
       await unlockVault(paymentSession.sessionToken, paymentSession.address, paymentSession.signer)
+      sessionStorage.removeItem("nobreach-pending-payment")
+      setPendingPayment(null)
       setPaymentSession(null)
     } catch (error) {
       console.error(error)
@@ -371,6 +435,15 @@ export default function Home() {
     } finally {
       setIsPaying(false)
     }
+  }
+
+  function prepareExistingPaymentVerification() {
+    const txHash = paymentTxHash.trim()
+    if (!ethers.isHexString(txHash, 32)) return alert("Enter a valid transaction hash")
+    const savedPayment = { owner: paymentSession.address, asset: paymentAsset, txHash }
+    setPendingPayment(savedPayment)
+    sessionStorage.setItem("nobreach-pending-payment", JSON.stringify(savedPayment))
+    setPaymentTxHash("")
   }
 
   async function uploadFile(file, input) {
@@ -543,12 +616,13 @@ export default function Home() {
               <p className="eyebrow">One-time vault activation</p>
               <h2>Activate your private vault.</h2>
               <div className="payment-choices">
-                <button className={paymentAsset === "ETH" ? "is-selected" : ""} onClick={() => setPaymentAsset("ETH")}>0.0002 ETH</button>
-                <button className={paymentAsset === "USDG" ? "is-selected" : ""} onClick={() => setPaymentAsset("USDG")}>2 USDG</button>
-                <button disabled>Stock tokens / soon</button>
+                {(paymentOptions?.options || [{ asset: "NBP", amount: "100000" }]).map(option => (
+                  <button key={option.asset} disabled={Boolean(pendingPayment) && pendingPayment.asset !== option.asset} className={paymentAsset === option.asset ? "is-selected" : ""} onClick={() => setPaymentAsset(option.asset)}>{option.amount} {option.asset}</button>
+                ))}
               </div>
               <div className="payment-summary"><span>Network</span><strong>Robinhood Chain</strong><span>Method</span><strong>{paymentAsset}</strong><span>Wallet</span><strong>{paymentSession.address.slice(0, 6)}...{paymentSession.address.slice(-4)}</strong></div>
-              <button className="connect-btn" onClick={completeOneTimePayment} disabled={isPaying}>{isPaying ? "Confirming payment..." : `Pay with ${paymentAsset}`}</button>
+              {!pendingPayment && <div className="payment-recovery"><input value={paymentTxHash} onChange={event => setPaymentTxHash(event.target.value)} placeholder="Already paid? Paste transaction hash" aria-label="Transaction hash" /><button type="button" onClick={prepareExistingPaymentVerification}>Verify existing payment</button></div>}
+              <button className="connect-btn" onClick={completeOneTimePayment} disabled={isPaying}>{isPaying ? "Confirming payment..." : pendingPayment?.asset === paymentAsset ? `Verify ${paymentAsset} payment` : `Pay with ${paymentAsset}`}</button>
             </section>
           )}
 
@@ -608,9 +682,10 @@ export default function Home() {
                 <h2 id="wallet-modal-title">Connect a wallet</h2>
                 <p>Choose an installed EVM wallet to access your NoBreach vault.</p>
                 <div className="wallet-options">
-                  <button onClick={connectWallet}><b>M</b><span><strong>MetaMask</strong><small>Browser wallet</small></span><i>&gt;</i></button>
-                  <button onClick={connectWallet}><b>C</b><span><strong>Coinbase Wallet</strong><small>Browser wallet</small></span><i>&gt;</i></button>
-                  <button onClick={connectWallet}><b>+</b><span><strong>Other EVM wallet</strong><small>Injected provider</small></span><i>&gt;</i></button>
+                  <button onClick={() => connectWallet("metamask")}><b>M</b><span><strong>MetaMask</strong><small>Browser wallet</small></span><i>&gt;</i></button>
+                  <button onClick={() => connectWallet("okx")}><b>O</b><span><strong>OKX Wallet</strong><small>Browser wallet</small></span><i>&gt;</i></button>
+                  <button onClick={() => connectWallet("coinbase")}><b>C</b><span><strong>Coinbase Wallet</strong><small>Browser wallet</small></span><i>&gt;</i></button>
+                  <button onClick={() => connectWallet("other")}><b>+</b><span><strong>Other EVM wallet</strong><small>Injected provider</small></span><i>&gt;</i></button>
                 </div>
                 <small className="wallet-modal-note">Your wallet will request approval before NoBreach can continue.</small>
               </section>

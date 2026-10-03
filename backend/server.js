@@ -10,9 +10,11 @@ const sessions = {}
 const PAYMENT_CHAIN_ID = 4663
 const PAYMENT_RPC_URL = process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"
 const PAYMENT_RECEIVER = process.env.PAYMENT_RECEIVER?.toLowerCase()
-const ONE_TIME_PAYMENT_ETH = process.env.ONE_TIME_PAYMENT_ETH || "0.002"
+const NBP_TOKEN_ADDRESS = (process.env.NBP_TOKEN_ADDRESS || "0x9e545052593BC326f84f257B7e4f73Cf6A8C2Cb3").toLowerCase()
+const ONE_TIME_PAYMENT_NBP = process.env.ONE_TIME_PAYMENT_NBP || "100000"
+const ONE_TIME_PAYMENT_ETH = process.env.ONE_TIME_PAYMENT_ETH
 const USDG_TOKEN_ADDRESS = process.env.USDG_TOKEN_ADDRESS?.toLowerCase()
-const ONE_TIME_PAYMENT_USDG = process.env.ONE_TIME_PAYMENT_USDG || "2"
+const ONE_TIME_PAYMENT_USDG = process.env.ONE_TIME_PAYMENT_USDG
 const rpcProvider = new ethers.JsonRpcProvider(PAYMENT_RPC_URL, PAYMENT_CHAIN_ID)
 const ERC20_INTERFACE = new ethers.Interface(["event Transfer(address indexed from, address indexed to, uint256 value)"])
 const allowedOrigins = new Set([
@@ -128,9 +130,10 @@ app.post("/login", async (req,res) => {
 })
 
 app.get("/payment/options", async (req, res) => {
-  if (!PAYMENT_RECEIVER || !ethers.isAddress(PAYMENT_RECEIVER)) return res.status(503).json({ error: "Payment receiver is not configured" })
-  const options = [{ asset: "ETH", amount: ONE_TIME_PAYMENT_ETH, type: "native" }]
-  if (USDG_TOKEN_ADDRESS && ethers.isAddress(USDG_TOKEN_ADDRESS)) {
+  if (!PAYMENT_RECEIVER || !ethers.isAddress(PAYMENT_RECEIVER) || !ethers.isAddress(NBP_TOKEN_ADDRESS)) return res.status(503).json({ error: "Payment receiver is not configured" })
+  const options = [{ asset: "NBP", amount: ONE_TIME_PAYMENT_NBP, type: "erc20", tokenAddress: NBP_TOKEN_ADDRESS, decimals: 18 }]
+  if (ONE_TIME_PAYMENT_ETH) options.push({ asset: "ETH", amount: ONE_TIME_PAYMENT_ETH, type: "native" })
+  if (ONE_TIME_PAYMENT_USDG && USDG_TOKEN_ADDRESS && ethers.isAddress(USDG_TOKEN_ADDRESS)) {
     options.push({ asset: "USDG", amount: ONE_TIME_PAYMENT_USDG, type: "erc20", tokenAddress: USDG_TOKEN_ADDRESS, decimals: 18 })
   }
   res.json({ receiver: PAYMENT_RECEIVER, chainId: PAYMENT_CHAIN_ID, options })
@@ -159,7 +162,8 @@ app.get("/payment/stock-tokens", async (req, res) => {
 
 app.post("/payment/verify", async (req, res) => {
   const owner = verifyWallet(req)
-  const { txHash, asset = "ETH" } = req.body
+  const normalizedOwner = owner?.toLowerCase()
+  const { txHash, asset = "NBP" } = req.body
   if (!owner || !txHash || !ethers.isHexString(txHash, 32)) return res.sendStatus(400)
   if (!PAYMENT_RECEIVER || !ethers.isAddress(PAYMENT_RECEIVER)) return res.status(503).json({ error: "Payment receiver is not configured" })
   const existing = await prisma.payment.findFirst({ where: { owner } })
@@ -167,17 +171,25 @@ app.post("/payment/verify", async (req, res) => {
   try {
     const [transaction, receipt] = await Promise.all([rpcProvider.getTransaction(txHash), rpcProvider.getTransactionReceipt(txHash)])
     if (!transaction || !receipt || receipt.status !== 1 || transaction.chainId !== BigInt(PAYMENT_CHAIN_ID)) return res.status(400).json({ error: "Payment transaction is not confirmed on Robinhood Chain" })
-    if (transaction.from.toLowerCase() !== owner.toLowerCase()) return res.status(400).json({ error: "Payment sender does not match" })
+    if (transaction.from.toLowerCase() !== normalizedOwner) return res.status(400).json({ error: "Payment sender does not match" })
     let amount
-    if (asset === "ETH") {
+    if (asset === "NBP") {
+      if (transaction.to?.toLowerCase() !== NBP_TOKEN_ADDRESS) return res.status(400).json({ error: "Payment was not sent through the configured NBP contract" })
+      const transfer = receipt.logs
+        .filter(log => log.address.toLowerCase() === NBP_TOKEN_ADDRESS)
+        .map(log => { try { return ERC20_INTERFACE.parseLog(log) } catch { return null } })
+        .find(log => log?.name === "Transfer" && log.args.from.toLowerCase() === normalizedOwner && log.args.to.toLowerCase() === PAYMENT_RECEIVER)
+      if (!transfer || transfer.args.value < ethers.parseUnits(ONE_TIME_PAYMENT_NBP, 18)) return res.status(400).json({ error: `Payment must be at least ${ONE_TIME_PAYMENT_NBP} NBP` })
+      amount = ethers.formatUnits(transfer.args.value, 18)
+    } else if (asset === "ETH" && ONE_TIME_PAYMENT_ETH) {
       if (transaction.to?.toLowerCase() !== PAYMENT_RECEIVER || transaction.value < ethers.parseEther(ONE_TIME_PAYMENT_ETH)) return res.status(400).json({ error: `Payment must be at least ${ONE_TIME_PAYMENT_ETH} ETH to the configured receiver` })
       amount = ethers.formatEther(transaction.value)
-    } else if (asset === "USDG" && USDG_TOKEN_ADDRESS && ethers.isAddress(USDG_TOKEN_ADDRESS)) {
+    } else if (asset === "USDG" && ONE_TIME_PAYMENT_USDG && USDG_TOKEN_ADDRESS && ethers.isAddress(USDG_TOKEN_ADDRESS)) {
       if (transaction.to?.toLowerCase() !== USDG_TOKEN_ADDRESS) return res.status(400).json({ error: "Payment was not sent through the configured USDG contract" })
       const transfer = receipt.logs
         .filter(log => log.address.toLowerCase() === USDG_TOKEN_ADDRESS)
         .map(log => { try { return ERC20_INTERFACE.parseLog(log) } catch { return null } })
-        .find(log => log?.name === "Transfer" && log.args.from.toLowerCase() === owner && log.args.to.toLowerCase() === PAYMENT_RECEIVER)
+        .find(log => log?.name === "Transfer" && log.args.from.toLowerCase() === normalizedOwner && log.args.to.toLowerCase() === PAYMENT_RECEIVER)
       if (!transfer || transfer.args.value < ethers.parseUnits(ONE_TIME_PAYMENT_USDG, 18)) return res.status(400).json({ error: `Payment must be at least ${ONE_TIME_PAYMENT_USDG} USDG` })
       amount = ethers.formatUnits(transfer.args.value, 18)
     } else {
